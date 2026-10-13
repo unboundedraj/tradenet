@@ -9,6 +9,37 @@ const prisma = new PrismaClient();
 const redisSub = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 const redisPub = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 
+async function recordOrderUpdate(command: any, status: string, price: number | null, reason?: string) {
+    await prisma.$transaction([
+        prisma.orderCommand.update({
+            where: { id: command.orderId },
+            data: { status: status }
+        }),
+        prisma.orderEvent.create({
+            data: {
+                orderId: command.orderId,
+                status: status,
+                price: price,
+                quantity: Number(command.quantity)
+            }
+        })
+    ]);
+
+    const eventPayload = {
+        type: "ORDER_UPDATE",
+        data: {
+            orderId: command.orderId,
+            status: status,
+            symbol: command.symbol,
+            price: price,
+            ...(reason && { reason }),
+            userId: command.userId // Important for routing
+        }
+    };
+
+    await redisPub.publish("events:order:status", JSON.stringify(eventPayload));
+}
+
 async function processOrder(message: string) {
   try {
     const command = JSON.parse(message);
@@ -19,6 +50,7 @@ async function processOrder(message: string) {
     
     if (!user || !user.binanceApiKey) {
       console.error("User keys not found");
+      await recordOrderUpdate(command, "REJECTED", null, "Binance API keys not configured");
       return;
     }
 
@@ -38,7 +70,8 @@ async function processOrder(message: string) {
         });
     } catch (binanceError: any) {
         console.error("Binance Error:", binanceError.response?.data || binanceError.message);
-        // TODO: Handle rejection events here
+        const reason = binanceError.response?.data?.msg || binanceError.message;
+        await recordOrderUpdate(command, "REJECTED", null, reason);
         return;
     }
 
@@ -47,36 +80,8 @@ async function processOrder(message: string) {
 
     console.log(`✅ Order Filled at ${fillPrice}`);
 
-    // 4. Update Database (Log Event)
-    // We update the main order status AND create an event log
-    await prisma.$transaction([
-        prisma.orderCommand.update({
-            where: { id: command.orderId },
-            data: { status: status }
-        }),
-        prisma.orderEvent.create({
-            data: {
-                orderId: command.orderId,
-                status: status,
-                price: fillPrice,
-                quantity: command.quantity
-            }
-        })
-    ]);
-
-    // 5. Publish Event to Frontend
-    const eventPayload = {
-        type: "ORDER_UPDATE",
-        data: {
-            orderId: command.orderId,
-            status: status,
-            symbol: command.symbol,
-            price: fillPrice,
-            userId: command.userId // Important for routing
-        }
-    };
-
-    await redisPub.publish("events:order:status", JSON.stringify(eventPayload));
+    // 4. Update Database (Log Event) and publish the event to the frontend
+    await recordOrderUpdate(command, status, fillPrice);
 
   } catch (error) {
     console.error("System Error:", error);

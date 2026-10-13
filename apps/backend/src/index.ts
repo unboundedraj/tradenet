@@ -68,7 +68,12 @@ app.post("/api/trading/orders", async (req, res) => {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     const userId = decoded.id;
     
-    const { symbol, side, type, quantity } = req.body;
+    const { symbol, side, type } = req.body;
+    const quantity = parseFloat(req.body.quantity);
+
+    if (!symbol || !side || !type || !Number.isFinite(quantity) || quantity <= 0) {
+      return res.status(400).json({ error: "symbol, side, type and a positive quantity are required" });
+    }
 
     // A. Log to Database immediately as PENDING
     const order = await prisma.orderCommand.create({
@@ -77,7 +82,7 @@ app.post("/api/trading/orders", async (req, res) => {
         symbol,
         side,
         type,
-        quantity: parseFloat(quantity),
+        quantity,
         status: "PENDING"
       }
     });
